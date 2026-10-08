@@ -1,0 +1,324 @@
+"""Technique Map and Experiments for the dashboard, plus the human gate (skip)."""
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from app.api.auth import current_user
+from app.api.deps import get_context
+from app.domain import scout as scout_rules
+from app.domain import taxonomy
+from app.domain.entities import (
+    Experiment,
+    ExperimentDirection,
+    ExperimentDirectionState,
+    TechniqueState,
+    TechniqueStatus,
+)
+from app.infra import repository as repo
+from app.services import criteria_corrections, experiment_directions, photographer_memory, scout
+from app.services.context import Context
+
+router = APIRouter(prefix="/api", tags=["experiments"])
+
+
+class TechniqueNode(BaseModel):
+    technique_id: str
+    name: str
+    family: str
+    status: TechniqueStatus
+    attempts: int
+    #: How many of those more than one lens saw and meant.
+    corroborated: int
+    sightings: int
+    corroborated_shots: int
+    distinct_scenes: int
+    distinct_shoots: int
+    reproduce_attempts: int
+    criteria_met_results: int
+    reproduce_sessions: int
+    evaluable_reproduce_sessions: int
+    criteria_met_sessions: int
+    abstentions: int
+    positive_keeper_shots: int
+    supported_condition_coverage: dict[str, int]
+    projection_version: str
+    input_digest: str
+    last_observed: str | None
+
+
+class TechniqueChoice(BaseModel):
+    technique_id: str
+    name: str
+    family: str
+    description: str
+    observed: bool
+    recurring: bool
+    corroborated_shots: int
+
+
+class ExperimentDirectionChoice(BaseModel):
+    source_shot_id: str
+    technique_id: str
+    state: ExperimentDirectionState
+
+
+@router.get("/techniques", response_model=list[TechniqueNode])
+async def technique_map(
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> list[TechniqueNode]:
+    """Every Technique with the photographer's record filled in.
+
+    No score crosses this boundary (decision 61): what is reported is how often
+    the Evidence saw it and how often more than one lens agreed.
+    """
+    states = {
+        state.technique_id: state
+        for state in await repo.list_technique_states(ctx.store, session_user["id"])
+    }
+    nodes = []
+    for technique_id, state in sorted(states.items()):
+        if not _has_evidence(state):
+            continue
+        technique = taxonomy.BY_ID.get(technique_id)
+        if technique is None:
+            continue
+        nodes.append(
+            TechniqueNode(
+                technique_id=technique.id,
+                name=technique.name,
+                family=technique.family.value,
+                status=state.status,
+                attempts=state.attempts,
+                corroborated=state.corroborated,
+                sightings=state.sightings,
+                corroborated_shots=state.corroborated_shots,
+                distinct_scenes=state.distinct_scenes,
+                distinct_shoots=state.distinct_shoots,
+                reproduce_attempts=state.reproduce_attempts,
+                criteria_met_results=state.criteria_met_results,
+                reproduce_sessions=state.reproduce_sessions,
+                evaluable_reproduce_sessions=state.evaluable_reproduce_sessions,
+                criteria_met_sessions=state.criteria_met_sessions,
+                abstentions=state.abstentions,
+                positive_keeper_shots=state.positive_keeper_shots,
+                supported_condition_coverage=state.supported_condition_coverage,
+                projection_version=state.projection_version,
+                input_digest=state.input_digest,
+                last_observed=state.last_observed.isoformat() if state.last_observed else None,
+            )
+        )
+    return nodes
+
+
+def _has_evidence(state: TechniqueState) -> bool:
+    """Keep deliberate Experiment history visible even after current sightings retract."""
+    return any(
+        (
+            state.sightings,
+            state.corroborated_shots,
+            state.distinct_scenes,
+            state.distinct_shoots,
+            state.reproduce_attempts,
+            state.criteria_met_results,
+            state.reproduce_sessions,
+            state.evaluable_reproduce_sessions,
+            state.criteria_met_sessions,
+            state.abstentions,
+            state.positive_keeper_shots,
+        )
+    ) or bool(state.supported_condition_coverage)
+
+
+@router.get("/techniques/catalogue", response_model=list[TechniqueChoice])
+async def technique_catalogue(
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> list[TechniqueChoice]:
+    """Still Techniques the Photographer may explicitly choose for Explore."""
+    states = {
+        state.technique_id: state
+        for state in await repo.list_technique_states(ctx.store, session_user["id"])
+    }
+    constraints = await photographer_memory.constraints_for(
+        ctx,
+        session_user["id"],
+        role="scout",
+        purpose="experiment_catalogue",
+    )
+    choices = []
+    for technique in taxonomy.TECHNIQUES:
+        if not scout_rules.available(
+            technique,
+            missing_gear=constraints.missing_gear,
+        ):
+            continue
+        state = states.get(technique.id)
+        choices.append(
+            TechniqueChoice(
+                technique_id=technique.id,
+                name=technique.name,
+                family=technique.family.value,
+                description=technique.cue,
+                observed=state is not None and _has_evidence(state),
+                recurring=state is not None and state.status is TechniqueStatus.RECURRING,
+                corroborated_shots=state.corroborated_shots if state is not None else 0,
+            )
+        )
+    return choices
+
+
+@router.post("/techniques/rebuild")
+async def rebuild_technique_map(
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> dict[str, int]:
+    """Re-derive the map from stored analyses. The Cartographer is pure and
+    idempotent on shot id, so this is safe any time and proves decision 3:
+    the model produces evidence, only the rules move the map."""
+    from app.services import cartographer
+
+    states = await cartographer.rebuild(ctx, session_user["id"])
+    return {
+        "shots_applied": len(await repo.list_analyses(ctx.store, session_user["id"])),
+        "techniques": len(states),
+    }
+
+
+@router.get("/experiments", response_model=list[Experiment])
+async def list_experiments(
+    limit: int = 20,
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> list[Experiment]:
+    return await repo.list_experiments(ctx.store, session_user["id"], limit=limit)
+
+
+@router.get("/experiments/open", response_model=Experiment | None)
+async def open_experiment(
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> Experiment | None:
+    return await repo.open_experiment(ctx.store, session_user["id"])
+
+
+@router.post("/experiments/issue", response_model=Experiment | None)
+async def issue_experiment(
+    force: bool = False,
+    technique_id: str = "",
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> Experiment | None:
+    """Ask Scout to check for a supported Direction now. Silence returns null."""
+    return await scout.issue(
+        ctx,
+        session_user["id"],
+        force=force,
+        technique_id=technique_id,
+        requested_reason="shot_technique" if technique_id else "",
+    )
+
+
+@router.post("/experiments/{experiment_id}/correct-criteria", response_model=Experiment)
+async def correct_criteria(
+    experiment_id: str,
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> Experiment:
+    """Replace an owned retired check once; retain its original results and Criteria."""
+    try:
+        return await criteria_corrections.correct(ctx, session_user["id"], experiment_id)
+    except repo.UnknownEntity as exc:
+        raise HTTPException(404, "Experiment not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.put("/experiment-directions", response_model=ExperimentDirection)
+async def choose_experiment_direction(
+    choice: ExperimentDirectionChoice,
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> ExperimentDirection:
+    """Save or leave a later question. This does not create an Experiment."""
+    try:
+        return await experiment_directions.choose(
+            ctx,
+            session_user["id"],
+            choice.source_shot_id,
+            choice.technique_id,
+            choice.state,
+        )
+    except repo.UnknownEntity as exc:
+        raise HTTPException(404, "Shot not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/experiment-directions/{direction_id}/start", response_model=Experiment)
+async def start_experiment_direction(
+    direction_id: str,
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> Experiment:
+    """Explicitly create Reproduce from one saved Direction."""
+    try:
+        return await experiment_directions.start(ctx, session_user["id"], direction_id)
+    except repo.UnknownEntity as exc:
+        raise HTTPException(404, "Experiment Direction not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/experiments/explore", response_model=Experiment | None)
+async def issue_explore(
+    force: bool = False,
+    technique_id: str = "",
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> Experiment | None:
+    """Ask Scout for supported optional Variations, never a graded substitute."""
+    return await scout.issue_explore(
+        ctx,
+        session_user["id"],
+        force=force,
+        technique_id=technique_id,
+    )
+
+
+@router.post("/experiments/{experiment_id}/complete", response_model=Experiment)
+async def complete_explore(
+    experiment_id: str,
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> Experiment:
+    try:
+        return await scout.complete_explore(ctx, session_user["id"], experiment_id)
+    except repo.UnknownEntity as exc:
+        raise HTTPException(404, "Experiment not found") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/experiments/{experiment_id}/skip", response_model=Experiment)
+async def skip_experiment(
+    experiment_id: str,
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> Experiment:
+    try:
+        return await scout.skip(ctx, session_user["id"], experiment_id)
+    except repo.UnknownEntity as exc:
+        raise HTTPException(404, "experiment not found") from exc
+
+
+@router.post("/experiments/{experiment_id}/leave", response_model=Experiment)
+async def leave_experiment(
+    experiment_id: str,
+    session_user: dict[str, str] = Depends(current_user),
+    ctx: Context = Depends(get_context),
+) -> Experiment:
+    try:
+        return await scout.leave(ctx, session_user["id"], experiment_id)
+    except repo.UnknownEntity as exc:
+        raise HTTPException(404, "experiment not found") from exc
