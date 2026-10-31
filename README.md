@@ -1,0 +1,118 @@
+# LensCraft
+
+Learn to see like yourself.
+
+LensCraft learns from every Shot, closes each Shoot into a learning record, offers one personal Experiment, and tracks what changes.
+
+It is built for the self-directed phone photographer who knows some Techniques but cannot tell whether their decisions are becoming deliberate or they are just getting lucky. LensCraft intercepts ordinary Camera still images, groups Scenes into one natural Shoot, records what repeated or varied, updates longitudinal memory, and chooses one justified next step. It does not score artistic quality.
+
+A model may interpret a Shot. Only the photographer supplies Intent, Keeper preference, and the signal that a Change was an improvement. Unmarked Shots remain unknown rather than disliked.
+
+Entry for the All Things Agentic Hackathon, Taskmaster track.
+
+Submission scope is the autonomous still-image Shoot loop. Gemini Live, Live Scene Sessions, Scene Probes, the post-Shot Coach, a custom viewfinder, and video Analysis are parked outside the submission and current roadmap.
+
+## Project origin and reused code
+
+I first explored [VizRabbit](https://github.com/fikri2992/vizrabbit), a collaborative visual-review agent, for the same All Things Agentic Hackathon. I set that direction aside and focused on LensCraft and the photography problem described above.
+
+VizRabbit's [first recorded commit](https://github.com/fikri2992/vizrabbit/commit/1e0ffb91d80b4c7a81dff444d61518a9bb7d0928) is dated August 14, 2026. LensCraft's [first recorded commit](https://github.com/fikri2992/shoots/commit/8b5d985f75ac6032f378d0ebe61bc1169c6d3e3a) is dated August 22, 2026. Both dates fall within the [August 3–31 submission period](https://allthingsagentichackathon.devpost.com/rules).
+
+The initial LensCraft commit calls the source "Visual QA base" and `visual-qa-agent`. Those names refer to VizRabbit. I reused its grid math, imaging helpers, ADK runtime, storage adapters, OAuth setup, and Vue shell. LensCraft added the photography domain, Shot-review agents, Technique Map, and Experiment workflow, followed by Android Phone Source, Shoot Records, Journey, and visual-story exports. The original commits remain available so the reused foundation and subsequent work can be checked separately.
+
+## Architecture
+
+![LensCraft hybrid event-driven agent workflow](docs/architecture.png)
+
+Pub/Sub separates replay-safe code stages. ADK coordinates the Analyst's in-process agent panel. Settled per-Shot Runs converge behind code-owned barriers into one revisioned Shoot Record. Read models deliver the Shoot receipt to Android and web, while FCM sends Android notices.
+
+[Open the full-size diagram](docs/architecture.svg) · [Read the architecture notes](docs/architecture.md) · [Inspect the detailed agent topology](docs/architecture-detailed.svg)
+
+**The web** remains the detailed audit desk. **Android** is the daily client: Now, Shots, Experiments, Journey, and Settings. Drive is an optional import and export adapter.
+
+**The Phone Source** (`android/`, Kotlin + Compose + WorkManager) keeps Android's normal camera in control. After one honest media permission, it watches only approved Camera media, streams unseen originals directly and idempotently, freezes explicit Capture Session membership, survives UI exit, and shows import/retry state. Selected-media access stays manual. Native Google identity and revocable device sessions are implemented; Firebase, OAuth, FCM, App Links, and a production-connected debug APK are configured. Human native sign-in completion, production signing, and full physical-device acceptance remain. Pairing endpoints remain only for older APKs.
+
+The current implementation has per-Shot Runs, one bounded Shot Teaching Receipt, typed Reproduce and Explore Capture Sessions, Technique Map, Tendency Profile, Change, Journey, persisted Scene/Shoot grouping, revisioned terminal Shoot Records, deterministic evidence-labelled Shoot receipts, scoped Photographer Signals, Mine/Inspiration authority, code-gated Scout help, replayable Intervention Records that adapt after repeated comparable outcomes, and evidence-bound Deconstruction carousels with photographer-owned covers. Android caches and leads Now with the current Shoot state or newest valid receipt. LensCraft is live on Cloud Run and authenticated web acceptance passed; continuous Phone Source and physical-device acceptance remain incomplete.
+
+- Docs: [product](docs/product.md) · [decisions](docs/product-decisions.md) · [feature list](docs/feature-list.md) · [implementation order](docs/implementation-order.md) · [learning path](docs/learning-path.md) · [agent quality](docs/agent-quality.md) · [architecture](docs/architecture.md) · [submission proof](docs/submission-proof.md) · [demo rehearsal](docs/demo-rehearsal.md) · [domain model](docs/domain-model.md) · [agents](docs/agents.md) · [memory contract](docs/final-memory.md) · [ChatGPT review](docs/chatgpt-analysis-2026-08-29.md) · [release readiness](docs/release-readiness.md) · [Cloud proof](docs/cloud-proof.md) · [Android setup](docs/android-setup.md) · [Deconstruction](docs/deconstruction.md) · [build diary](docs/build-plan.md) · [codebase rules](AGENTS.md)
+- Stack: Vue 3 (Options API) + Vite + Tailwind PWA · Kotlin + Compose + WorkManager (`android/`) · FastAPI + Google ADK · Firestore + GCS + Pub/Sub + Cloud Scheduler + Secret Manager + Cloud Run
+- Models: `gemini-3.7-flash` (Analyst panel, Scout, Judge feedback, Journey writer, Listener). Retained Gemini Live and Director/Veo paths are legacy code outside the submission and current roadmap.
+
+## Prerequisites
+
+- Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/)
+- Node ≥ 20
+- ffmpeg and ffprobe on PATH
+- A Google Cloud project with Vertex AI enabled, or an AI Studio key for local work
+
+## Setup
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+Fill in `backend/.env` (see the comments in the file). Then:
+
+```bash
+cd backend && uv sync
+```
+
+```bash
+cd frontend && npm install
+```
+
+## Run
+
+```bat
+start_dev.bat
+```
+
+Backend on http://localhost:8000, frontend on http://localhost:5173 (Vite proxies `/api`, `/auth`, `/drive`).
+
+## Verify
+
+```bash
+cd backend && uv run pytest
+```
+
+The suite uses real files, real ffmpeg, real stores, and integration contracts for retry and concurrency. Agent quality is not inferred from mocked Gemini calls. `backend/scripts/check_learning_quality.py` runs the real Ingest and Analyst stages against a labelled manifest and saves a versioned report; the narrower live-model probes remain under `backend/scripts/check_*.py`.
+
+## Deploy
+
+One Cloud Run service in `asia-southeast2`, running as the `shoots-ingest` service account, with Firestore, a GCS bucket, Secret Manager, Pub/Sub push subscriptions (one per stage, each with a dead-letter topic) and three Cloud Scheduler jobs. The image is built on Cloud Build; no local Docker needed.
+
+```bash
+export GCP_PROJECT=<project-id>
+export GCP_LOCATION=asia-southeast2
+export ENV_FILE=backend/.env
+```
+
+```bash
+./infra/enable-apis.sh
+```
+
+```bash
+ENV_FILE=backend/.env ./infra/state.sh
+```
+
+```bash
+./infra/preflight.sh
+```
+
+```bash
+./infra/deploy.sh
+```
+
+```bash
+PUBSUB_PUSH_BASE_URL=https://shoots-<project-number>.asia-southeast2.run.app PUBSUB_PUSH_SA=shoots-ingest@<project>.iam.gserviceaccount.com ./infra/topics.sh
+```
+
+```bash
+./infra/scheduler.sh
+```
+
+Then add `<service url>/auth/callback` to the OAuth client's redirect URIs. `deploy.sh` prints the URL; it is deterministic from the project number, so the env vars that need it are right on the first deploy.
+
+See [Cloud proof](docs/cloud-proof.md) for the exact readback and unattended workflow,
+and [Android setup](docs/android-setup.md) for OAuth, Firebase, App Links, release
+signing, and physical acceptance.
