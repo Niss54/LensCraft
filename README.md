@@ -38,12 +38,14 @@ The current implementation has per-Shot Runs, one bounded Shot Teaching Receipt,
 - Stack: Vue 3 (Options API) + Vite + Tailwind PWA · Kotlin + Compose + WorkManager (`android/`) · FastAPI + Google ADK · Firestore + GCS + Pub/Sub + Cloud Scheduler + Secret Manager + Cloud Run
 - Models: `gemini-3.7-flash` (Analyst panel, Scout, Judge feedback, Journey writer, Listener). Retained Gemini Live and Director/Veo paths are legacy code outside the submission and current roadmap.
 
+
 ## Prerequisites
 
 - Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/)
 - Node ≥ 20
 - ffmpeg and ffprobe on PATH
 - A Google Cloud project with Vertex AI enabled, or an AI Studio key for local work
+
 
 ## Setup
 
@@ -76,6 +78,7 @@ cd backend && uv run pytest
 ```
 
 The suite uses real files, real ffmpeg, real stores, and integration contracts for retry and concurrency. Agent quality is not inferred from mocked Gemini calls. `backend/scripts/check_learning_quality.py` runs the real Ingest and Analyst stages against a labelled manifest and saves a versioned report; the narrower live-model probes remain under `backend/scripts/check_*.py`.
+
 
 ## Deploy
 
