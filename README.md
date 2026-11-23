@@ -1,6 +1,6 @@
 # LensCraft
 
-Learn to see like yourself.
+Learn to see like yourself...
 
 LensCraft learns from every Shot, closes each Shoot into a learning record, offers one personal Experiment, and tracks what changes.
 
